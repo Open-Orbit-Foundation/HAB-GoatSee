@@ -16,6 +16,8 @@ import RPi.GPIO as GPIO
 
 # === Camera ===
 from picamera2 import Picamera2
+from picamera2.encoders import H264Encoder
+
 
 # === Serial / GPS ===
 import serial
@@ -54,7 +56,7 @@ def init_sensors():
 
     # === BNO08x IMU (on separate Extended I2C bus 1) ===
     try:
-        sensors["bno"] = BNO08xSensor(i2c_bus=1)
+        sensors["bno"] = BNO08xSensor(i2c)
     except Exception as e:
         print(f"[BNO08x] IMU failed to initialize: {e}")
         sensors["bno"] = None
@@ -140,7 +142,7 @@ def sensor_logger(sensors):
 
 def camera_thread():
     VIDEO_DIR = "flight_video"
-    VIDEO_DURATION = 600  # seconds = 10 minutes
+    VIDEO_DURATION = 600
     os.makedirs(VIDEO_DIR, exist_ok=True)
 
     def timestamp():
@@ -149,58 +151,64 @@ def camera_thread():
     cam = Picamera2()
     cam.configure(cam.create_video_configuration(main={"size": (640, 480)}))
     cam.start()
-    time.sleep(2)  # Warm-up time
+    time.sleep(2)
+
+    encoder = H264Encoder()
 
     while True:
         try:
             fname = os.path.join(VIDEO_DIR, f"video_{timestamp()}.h264")
-            print(f"[Camera] Recording: {fname}")
-            cam.start_recording(output=fname)
+            print(f"[Camera] Recording to {fname}")
+            cam.start_recording(encoder, output=fname)
             time.sleep(VIDEO_DURATION)
             cam.stop_recording()
         except Exception as e:
             print(f"[Camera] Error: {e}")
-            time.sleep(5)  # Delay before retry
+            time.sleep(5)
 
 def gps_logger():
+    import os
+    import serial
+    from datetime import datetime
+
     GPS_LOG_DIR = "gps_logs"
-    GPS_PORT = "/dev/ttyAMA0"  # Or "/dev/serial0"
+    GPS_PORT = "/dev/ttyAMA0"   # Use "/dev/serial0" if needed
     GPS_BAUD = 9600
+    ROTATE_INTERVAL = 600  # seconds
+
     os.makedirs(GPS_LOG_DIR, exist_ok=True)
 
-    def timestamp():
-        return datetime.now().strftime("%Y%m%d_%H%M%S")
-
-    def line_time():
-        return datetime.now().isoformat()
+    def new_logfile():
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        return open(os.path.join(GPS_LOG_DIR, f"gps_{ts}.txt"), "a")
 
     try:
         port = serial.Serial(GPS_PORT, GPS_BAUD, timeout=1)
-        print("[GPS] Serial port opened.")
+        print(f"[GPS] Connected on {GPS_PORT} at {GPS_BAUD} baud.")
     except Exception as e:
-        print(f"[GPS] Failed to open port: {e}")
+        print(f"[GPS] Failed to open serial port: {e}")
         return
 
-    fname = os.path.join(GPS_LOG_DIR, f"gps_{timestamp()}.txt")
-    f = open(fname, "a")
-    next_split = time.time() + 600
+    log_file = new_logfile()
+    next_rotate = time.time() + ROTATE_INTERVAL
 
     while True:
         try:
-            if port.in_waiting > 0:
+            if port.in_waiting:
                 line = port.readline().decode("utf-8", errors="replace").strip()
+                timestamp = datetime.now().isoformat()
 
-                if time.time() >= next_split:
-                    f.close()
-                    fname = os.path.join(GPS_LOG_DIR, f"gps_{timestamp()}.txt")
-                    f = open(fname, "a")
-                    next_split = time.time() + 600
+                if time.time() >= next_rotate:
+                    log_file.close()
+                    log_file = new_logfile()
+                    next_rotate = time.time() + ROTATE_INTERVAL
 
-                f.write(f"{line_time()},{line}\n")
-                f.flush()
+                log_file.write(f"{timestamp},{line}\n")
+                log_file.flush()
         except Exception as e:
-            print(f"[GPS] Error: {e}")
+            print(f"[GPS Logger Error] {e}")
             time.sleep(1)
+
 
 def shutdown_monitor(timeout_sec=10800):
     DISABLE_PIN = 21  # BCM numbering (GPIO21 = pin 40)
@@ -228,37 +236,21 @@ def shutdown_monitor(timeout_sec=10800):
         time.sleep(1)
 
 
+# === MAIN FUNCTION ===
 def main():
-    print("[Main] Booting High-Altitude Flight Stack...")
-
-    # === Initialize Sensors ===
+    print("[Main] Launching HAB system...")
     sensors = init_sensors()
+    threading.Thread(target=sensor_logger, args=(sensors,), daemon=True).start()
+    threading.Thread(target=camera_thread, daemon=True).start()
+    threading.Thread(target=gps_logger, daemon=True).start()
+    threading.Thread(target=shutdown_monitor, daemon=True).start()
 
-    # === Start Threads ===
-    threads = []
-
-    t_logger = threading.Thread(target=sensor_logger, args=(sensors,), daemon=True)
-    threads.append(t_logger)
-
-    t_camera = threading.Thread(target=camera_thread, daemon=True)
-    threads.append(t_camera)
-
-    t_gps = threading.Thread(target=gps_logger, daemon=True)
-    threads.append(t_gps)
-
-    t_shutdown = threading.Thread(target=shutdown_monitor, args=(10800,), daemon=True)
-    threads.append(t_shutdown)
-
-    print("[Main] Threads initialized. Starting all systems...")
-
-    for t in threads:
-        t.start()
-
-    print("[Main] Flight system running. Ctrl+C to abort (simulated ground mode).")
-
-    # === Keep Alive Until Interrupted ===
     try:
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
-        print("[Main] Interrupted. Gracefully exiting...")
+        print("[Main] Manual interrupt. Exiting cleanly.")
+
+# === LAUNCH ===
+if __name__ == "__main__":
+    main()

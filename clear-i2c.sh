@@ -1,0 +1,14 @@
+#!/bin/bash
+i2cget -y 1 0x67
+i2cget -y 1 0x67
+i2cget -y 1 0x77
+i2cget -y 1 0x77
+i2cget -y 1 0x4a
+i2cget -y 1 0x4a
+i2cget -y 1 0x28
+i2cget -y 1 0x28
+
+
+
+
+
